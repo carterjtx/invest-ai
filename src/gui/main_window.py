@@ -78,32 +78,77 @@ class MainWindow:
 
     def _init_services(self):
         """Initialize all services."""
-        # Data service for persistence
+        # Data service for persistence (must be first to load settings)
         self.data_service = DataService(config.DATA_DIR)
+
+        # Load saved API keys from settings (override config.py defaults)
+        settings = self.data_service.load_settings()
+        self._anthropic_key = settings.get("anthropic_api_key", "").strip()
+        self._news_key = settings.get("news_api_key", "").strip()
+
+        # Fall back to config.py if no saved keys
+        if not self._anthropic_key:
+            self._anthropic_key = config.ANTHROPIC_API_KEY
+        if not self._news_key:
+            self._news_key = config.NEWS_API_KEY
 
         # Price service for stock/crypto prices
         self.price_service = PriceService(
             cache_duration_seconds=config.PRICE_CACHE_DURATION
         )
 
-        # News service
-        if config.NEWS_API_KEY and config.NEWS_API_KEY != "your_newsapi_key_here":
+        # Initialize news and AI services
+        self._init_news_service()
+        self._init_ai_service()
+
+        logger.info("Services initialized")
+
+    def _init_news_service(self):
+        """Initialize or reinitialize the news service."""
+        if self._news_key and self._news_key != "your_newsapi_key_here":
             self.news_service = NewsService(
-                api_key=config.NEWS_API_KEY,
+                api_key=self._news_key,
                 cache_duration_seconds=config.NEWS_CACHE_DURATION,
             )
+            logger.info("News service initialized with API key")
         else:
             logger.info("Using mock news service (NewsAPI key not configured)")
             self.news_service = MockNewsService()
 
-        # AI service
-        if config.ANTHROPIC_API_KEY and config.ANTHROPIC_API_KEY != "your_anthropic_key_here":
-            self.ai_service = AIService(api_key=config.ANTHROPIC_API_KEY)
+    def _init_ai_service(self):
+        """Initialize or reinitialize the AI service."""
+        if self._anthropic_key and self._anthropic_key != "your_anthropic_key_here":
+            self.ai_service = AIService(api_key=self._anthropic_key)
+            logger.info("AI service initialized with API key")
         else:
             logger.info("Using mock AI service (Anthropic key not configured)")
             self.ai_service = MockAIService()
 
-        logger.info("Services initialized")
+    def reinitialize_services(self):
+        """Reinitialize services after API key changes."""
+        # Reload settings
+        settings = self.data_service.load_settings()
+        self._anthropic_key = settings.get("anthropic_api_key", "").strip()
+        self._news_key = settings.get("news_api_key", "").strip()
+
+        # Fall back to config.py if no saved keys
+        if not self._anthropic_key:
+            self._anthropic_key = config.ANTHROPIC_API_KEY
+        if not self._news_key:
+            self._news_key = config.NEWS_API_KEY
+
+        # Reinitialize services
+        self._init_news_service()
+        self._init_ai_service()
+
+        # Update status bar
+        self._update_status_bar()
+
+        # Refresh chat tab to show updated AI status
+        if hasattr(self, 'chat_tab'):
+            self.chat_tab._add_welcome_message()
+
+        logger.info("Services reinitialized with updated API keys")
 
     def _load_portfolio(self) -> Portfolio:
         """Load portfolio from disk or create new one."""
@@ -230,8 +275,12 @@ class MainWindow:
         self.status_bar = ttk.Frame(self.main_container)
         self.status_bar.pack(fill="x", pady=(10, 0))
 
-        # Status message
-        self.status_var = tk.StringVar(value="Ready")
+        # Status message - preserve existing value if recreating
+        current_status = "Ready"
+        if hasattr(self, 'status_var'):
+            current_status = self.status_var.get()
+        self.status_var = tk.StringVar(value=current_status)
+
         status_label = ttk.Label(
             self.status_bar,
             textvariable=self.status_var,
@@ -339,93 +388,16 @@ class MainWindow:
 
     def _show_settings(self):
         """Show settings dialog."""
-        # Create settings dialog
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Settings")
-        dialog.geometry("400x300")
-        dialog.transient(self.root)
-        dialog.grab_set()
+        from .settings_dialog import SettingsDialog
+        dialog = SettingsDialog(self.root, self)
+        self.root.wait_window(dialog)
 
-        frame = ttk.Frame(dialog, padding=20)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(
-            frame,
-            text="Settings",
-            style="Heading.TLabel",
-        ).pack(anchor="w", pady=(0, 20))
-
-        # API Keys section
-        ttk.Label(frame, text="API Configuration", style="Subheading.TLabel").pack(anchor="w", pady=(0, 10))
-
-        ttk.Label(
-            frame,
-            text="API keys are configured in config.py or via environment variables.\n\n"
-            "Current Status:\n"
-            f"- NewsAPI: {'Configured' if self.news_service.is_available() else 'Not configured'}\n"
-            f"- Claude AI: {'Configured' if self.ai_service.is_available() else 'Not configured'}\n"
-            f"- Yahoo Finance: {'Available' if self.price_service.is_available() else 'Not available'}",
-            justify="left",
-            wraplength=350,
-        ).pack(anchor="w", pady=10)
-
-        # Data management
-        ttk.Separator(frame).pack(fill="x", pady=20)
-        ttk.Label(frame, text="Data Management", style="Subheading.TLabel").pack(anchor="w", pady=(0, 10))
-
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(anchor="w")
-
-        ttk.Button(
-            btn_frame,
-            text="Export Portfolio (CSV)",
-            command=lambda: self._export_csv(dialog),
-        ).pack(side="left", padx=(0, 10))
-
-        ttk.Button(
-            btn_frame,
-            text="View Backups",
-            command=lambda: self._view_backups(dialog),
-        ).pack(side="left")
-
-        # Close button
-        ttk.Button(
-            frame,
-            text="Close",
-            command=dialog.destroy,
-        ).pack(pady=20)
-
-    def _export_csv(self, parent):
-        """Export portfolio to CSV."""
-        from tkinter import filedialog
-
-        filepath = filedialog.asksaveasfilename(
-            parent=parent,
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv")],
-            initialfilename="portfolio_export.csv",
-        )
-        if filepath:
-            if self.data_service.export_portfolio_csv(self.portfolio, Path(filepath)):
-                messagebox.showinfo("Export Complete", f"Portfolio exported to:\n{filepath}")
-            else:
-                messagebox.showerror("Export Failed", "Failed to export portfolio")
-
-    def _view_backups(self, parent):
-        """Show backup files."""
-        backups = self.data_service.get_backup_list()
-        if not backups:
-            messagebox.showinfo("Backups", "No backup files found")
-            return
-
-        backup_list = "\n".join(
-            f"- {b['filename']} ({b['modified'][:10]})"
-            for b in backups[:10]
-        )
-        messagebox.showinfo(
-            "Available Backups",
-            f"Found {len(backups)} backup(s):\n\n{backup_list}"
-        )
+    def _update_status_bar(self):
+        """Update the status bar API indicators."""
+        # Recreate the status bar to update indicators
+        if hasattr(self, 'status_bar'):
+            self.status_bar.destroy()
+        self._create_status_bar()
 
     def _on_close(self):
         """Handle window close event."""
